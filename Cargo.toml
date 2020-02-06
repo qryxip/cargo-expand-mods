@@ -1,0 +1,14 @@
+[package]
+edition = "2018"
+name = "cargo-expand-mods"
+version = "0.0.0"
+authors = ["Ryo Yamashita <qryxip@gmail.com>"]
+publish = false
+description = "Cargo subcommand to expand only `mod`s"
+readme = "README.md"
+keywords = []
+categories = []
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/qryxip/cargo-expand-mods"
+
+[dependencies]
