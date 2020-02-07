@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
         let metadata = {
             let mut cmd = MetadataCommand::new();
             if !features.is_empty() {
-                cmd.features(CargoOpt::SomeFeatures(features.clone()));
+                cmd.features(CargoOpt::SomeFeatures(features));
             }
             if all_features {
                 cmd.features(CargoOpt::AllFeatures);
