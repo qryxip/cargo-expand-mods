@@ -9,8 +9,10 @@ use structopt::StructOpt;
 use syn::token::Brace;
 use syn::{Item, Lit, Meta, MetaNameValue};
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::{fs, iter};
+use std::process::{Command, Output, Stdio};
+use std::{fs, iter, str};
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -106,82 +108,94 @@ fn main() -> anyhow::Result<()> {
         todo!();
     }
 
-    let src_path = {
-        let metadata = {
-            let mut cmd = MetadataCommand::new();
-            if !features.is_empty() {
-                cmd.features(CargoOpt::SomeFeatures(features));
-            }
-            if all_features {
-                cmd.features(CargoOpt::AllFeatures);
-            }
-            if no_default_features {
-                cmd.features(CargoOpt::NoDefaultFeatures);
-            }
-            if let Some(manifest_path) = &manifest_path {
-                cmd.manifest_path(manifest_path);
-            }
-            if frozen {
-                cmd.other_options(&["--frozen".to_owned()]);
-            }
-            if locked {
-                cmd.other_options(&["--locked".to_owned()]);
-            }
-            if offline {
-                cmd.other_options(&["--offline".to_owned()]);
-            }
-            cmd.exec()?
-        };
-
-        let id = metadata
-            .resolve
-            .as_ref()
-            .and_then(|Resolve { root, .. }| root.as_ref())
-            .ok_or_else(|| anyhow!("This manifest seems to be a virtual manifest"))
-            .with_context(|| anyhow!("Could not determine the target package"))?;
-
-        let package = metadata
-            .packages
-            .into_iter()
-            .find(|p| p.id == *id)
-            .unwrap_or_else(|| todo!());
-
-        let default_run = fs::read_to_string(&package.manifest_path)
-            .map_err(anyhow::Error::from)
-            .and_then(|cargo_toml| toml::from_str::<CargoToml>(&cargo_toml).map_err(Into::into))
-            .with_context(|| anyhow!("Could not read {}", package.manifest_path.to_str().unwrap()))?
-            .package
-            .and_then(|CargoTomlPackage { default_run }| default_run);
-
-        package
-            .targets
-            .into_iter()
-            .find(|Target { name, kind, .. }| {
-                lib && (kind.contains(&"lib".to_owned()) || kind.contains(&"proc-macro".to_owned()))
-                    || bin
-                        .as_ref()
-                        .map_or(false, |b| b == name && kind.contains(&"bin".to_owned()))
-                    || example
-                        .as_ref()
-                        .map_or(false, |e| e == name && kind.contains(&"example".to_owned()))
-                    || test
-                        .as_ref()
-                        .map_or(false, |t| t == name && kind.contains(&"test".to_owned()))
-                    || bench
-                        .as_ref()
-                        .map_or(false, |b| b == name && kind.contains(&"bench".to_owned()))
-                    || default_run
-                        .as_ref()
-                        .map_or(false, |d| d == name && kind.contains(&"bin".to_owned()))
-            })
-            .ok_or_else(|| anyhow!("Could not determine which target to expand"))?
-            .src_path
+    let metadata = {
+        let mut cmd = MetadataCommand::new();
+        if !features.is_empty() {
+            cmd.features(CargoOpt::SomeFeatures(features));
+        }
+        if all_features {
+            cmd.features(CargoOpt::AllFeatures);
+        }
+        if no_default_features {
+            cmd.features(CargoOpt::NoDefaultFeatures);
+        }
+        if let Some(manifest_path) = &manifest_path {
+            cmd.manifest_path(manifest_path);
+        }
+        if frozen {
+            cmd.other_options(&["--frozen".to_owned()]);
+        }
+        if locked {
+            cmd.other_options(&["--locked".to_owned()]);
+        }
+        if offline {
+            cmd.other_options(&["--offline".to_owned()]);
+        }
+        cmd.exec()?
     };
+
+    let id = metadata
+        .resolve
+        .as_ref()
+        .and_then(|Resolve { root, .. }| root.as_ref())
+        .ok_or_else(|| anyhow!("This manifest seems to be a virtual manifest"))
+        .with_context(|| anyhow!("Could not determine the target package"))?;
+
+    let package = metadata
+        .packages
+        .into_iter()
+        .find(|p| p.id == *id)
+        .unwrap_or_else(|| todo!());
+
+    let default_run = fs::read_to_string(&package.manifest_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|cargo_toml| toml::from_str::<CargoToml>(&cargo_toml).map_err(Into::into))
+        .with_context(|| anyhow!("Could not read {}", package.manifest_path.to_str().unwrap()))?
+        .package
+        .and_then(|CargoTomlPackage { default_run }| default_run);
+
+    let Target { src_path, .. } = package
+        .targets
+        .into_iter()
+        .find(|Target { name, kind, .. }| {
+            lib && (kind.contains(&"lib".to_owned()) || kind.contains(&"proc-macro".to_owned()))
+                || bin
+                    .as_ref()
+                    .map_or(false, |b| b == name && kind.contains(&"bin".to_owned()))
+                || example
+                    .as_ref()
+                    .map_or(false, |e| e == name && kind.contains(&"example".to_owned()))
+                || test
+                    .as_ref()
+                    .map_or(false, |t| t == name && kind.contains(&"test".to_owned()))
+                || bench
+                    .as_ref()
+                    .map_or(false, |b| b == name && kind.contains(&"bench".to_owned()))
+                || default_run
+                    .as_ref()
+                    .map_or(false, |d| d == name && kind.contains(&"bin".to_owned()))
+        })
+        .ok_or_else(|| anyhow!("Could not determine which target to expand"))?;
 
     let mut file = read_code(&src_path)?;
     expand_mods(&src_path, true, &mut file.items)?;
 
-    println!("{}", quote!(#file));
+    let mut child = Command::new("rustfmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| anyhow!("Could not execute `rustfmt`"))?;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(quote!(#file).to_string().as_ref())?;
+    let Output { status, stdout, .. } = child.wait_with_output()?;
+    if !status.success() {
+        return Err(anyhow!("`rustfmt` failed: {:?}", status));
+    }
+
+    println!("{}", str::from_utf8(&stdout)?);
     Ok(())
 }
 
