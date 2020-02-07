@@ -12,3 +12,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/qryxip/cargo-expand-mods"
 
 [dependencies]
+anyhow = "1.0.26"
+arrayvec = "0.5.1"
+cargo_metadata = "0.9.1"
+itertools = "0.8.2"
+quote = "1.0.2"
+serde = { version = "1.0.104", features = ["derive"] }
+structopt = "0.3.9"
+syn = { version = "1.0.14", features = ["full","visit-mut"] }
+toml = "0.5.6"
