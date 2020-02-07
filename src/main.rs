@@ -7,7 +7,7 @@ use serde::Deserialize;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use syn::token::Brace;
-use syn::{Attribute, Item, Lit, Meta, MetaNameValue};
+use syn::{Item, Lit, Meta, MetaNameValue};
 
 use std::path::{Path, PathBuf};
 use std::{fs, iter};
@@ -208,40 +208,48 @@ fn expand_mods(current_path: &Path, is_start: bool, items: &mut [Item]) -> anyho
                 let paths = item_mod
                     .attrs
                     .iter()
-                    .flat_map(Attribute::parse_meta)
-                    .flat_map(|meta| match meta {
+                    .enumerate()
+                    .flat_map(|(i, a)| a.parse_meta().map(|m| (Some(i), m)))
+                    .flat_map(|(i, meta)| match meta {
                         Meta::NameValue(MetaNameValue { path, lit, .. })
                             if path.get_ident().map_or(false, |ident| ident == "path") =>
                         {
-                            Some(lit)
+                            Some((i, lit))
                         }
                         _ => None,
                     })
-                    .flat_map(|lit| match lit {
-                        Lit::Str(lit_str) => Some(lit_str.value()),
+                    .flat_map(|(i, lit)| match lit {
+                        Lit::Str(lit_str) => Some((i, lit_str.value())),
                         _ => None,
                     })
                     .next()
-                    .map(|path| iter::once(dir.join(path)).collect::<ArrayVec<[_; 2]>>())
+                    .map(|(i, p)| iter::once((i, dir.join(p))).collect::<ArrayVec<[_; 2]>>())
                     .unwrap_or_else(|| {
                         let mut dir = dir.to_owned();
                         if !(is_start || file_stem == "mod") {
                             dir = dir.join(file_stem);
                         }
                         let mut paths = ArrayVec::new();
-                        paths.push(dir.join(format!("{}.rs", item_mod.ident)));
-                        paths.push(dir.join(item_mod.ident.to_string()).join("mod.rs"));
+                        paths.push((None, dir.join(format!("{}.rs", item_mod.ident))));
+                        paths.push((None, dir.join(item_mod.ident.to_string()).join("mod.rs")));
                         paths
                     });
 
-                let path = paths
+                let (i, path) = paths
                     .iter()
-                    .filter(|p| p.exists())
+                    .filter(|(_, p)| p.exists())
                     .exactly_one()
-                    .map_err(|err| match err.count() {
-                        0 => anyhow!("None of the files exists: {:?}", paths),
-                        _ => anyhow!("Multiple files exist: {:?}", paths),
+                    .map_err(|err| {
+                        let paths = paths.iter().map(|(_, p)| p.to_str().unwrap()).format(", ");
+                        match err.count() {
+                            0 => anyhow!("None of the files exists: {{{}}}", paths),
+                            _ => anyhow!("Multiple files exist: {{{}}}", paths),
+                        }
                     })?;
+
+                if let Some(i) = *i {
+                    item_mod.attrs.remove(i);
+                }
 
                 let syn::File {
                     attrs, mut items, ..
