@@ -21,3 +21,4 @@ serde = { version = "1.0.106", features = ["derive"] }
 structopt = "0.3.12"
 syn = { version = "1.0.17", features = ["full","visit-mut"] }
 toml = "0.5.6"
+url = "2.1.1"
