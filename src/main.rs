@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context as _};
+use anyhow::{anyhow, ensure, Context as _};
 use arrayvec::ArrayVec;
-use cargo_metadata::{CargoOpt, MetadataCommand, Resolve, Target};
+use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
 use itertools::Itertools as _;
 use quote::quote;
 use serde::Deserialize;
@@ -8,11 +8,12 @@ use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use syn::token::Brace;
 use syn::{Item, Lit, Meta, MetaNameValue};
+use url::Url;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::{fs, iter, str};
+use std::{env, fs, iter, str};
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -60,7 +61,7 @@ enum Opt {
         #[structopt(long)]
         offline: bool,
 
-        /// TODO
+        /// Package with the target to expand
         #[structopt(short, long, value_name("SPEC"))]
         package: Option<String>,
 
@@ -104,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         bench,
     } = Opt::from_args();
 
-    if color.is_some() || package.is_some() {
+    if color.is_some() {
         todo!();
     }
 
@@ -134,48 +135,100 @@ fn main() -> anyhow::Result<()> {
         cmd.exec()?
     };
 
-    let id = metadata
-        .resolve
-        .as_ref()
-        .and_then(|Resolve { root, .. }| root.as_ref())
-        .ok_or_else(|| anyhow!("This manifest seems to be a virtual manifest"))
-        .with_context(|| anyhow!("Could not determine the target package"))?;
-
-    let package = metadata
+    let mut members = metadata
         .packages
-        .into_iter()
-        .find(|p| p.id == *id)
-        .unwrap_or_else(|| todo!());
+        .iter()
+        .filter(|Package { id, .. }| metadata.workspace_members.contains(id));
 
-    let default_run = fs::read_to_string(&package.manifest_path)
-        .map_err(anyhow::Error::from)
-        .and_then(|cargo_toml| toml::from_str::<CargoToml>(&cargo_toml).map_err(Into::into))
-        .with_context(|| anyhow!("Could not read {}", package.manifest_path.to_str().unwrap()))?
-        .package
-        .and_then(|CargoTomlPackage { default_run }| default_run);
+    let packages = if let Some(package) = package {
+        let cargo_exe = env::var_os("CARGO").with_context(|| "`$CARGO` should be present")?;
 
-    let Target { src_path, .. } = package
-        .targets
+        let manifest_path = metadata
+            .resolve
+            .as_ref()
+            .and_then(|Resolve { root, .. }| root.as_ref())
+            .map(|id| metadata[id].manifest_path.clone())
+            .unwrap_or_else(|| metadata.workspace_root.join("Cargo.toml"));
+
+        let output = Command::new(&cargo_exe)
+            .arg("pkgid")
+            .arg("--manifest-path")
+            .arg(manifest_path)
+            .arg(&package)
+            .output()?;
+
+        let stdout = str::from_utf8(&output.stdout)?.trim_end();
+        let stderr = str::from_utf8(&output.stderr)?.trim_end();
+
+        ensure!(output.status.success(), "{}", stderr);
+
+        let url = stdout.parse::<Url>()?;
+        let fragment = url.fragment().expect("the URL should contain fragment");
+        let spec_name = match *fragment.splitn(2, ':').collect::<Vec<_>>() {
+            [name, _] => name,
+            [_] => url
+                .path_segments()
+                .and_then(Iterator::last)
+                .expect("should contain name"),
+            _ => unreachable!(),
+        };
+
+        let package = members
+            .find(|Package { name, .. }| name == spec_name)
+            .with_context(|| format!("package `{}` is not a member of the workspace", package))?;
+        vec![package]
+    } else {
+        members.collect()
+    };
+
+    let default_run = if let Ok(package) = packages.iter().exactly_one() {
+        fs::read_to_string(&package.manifest_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|cargo_toml| toml::from_str::<CargoToml>(&cargo_toml).map_err(Into::into))
+            .with_context(|| format!("Could not read {}", package.manifest_path.to_str().unwrap()))?
+            .package
+            .and_then(|CargoTomlPackage { default_run }| default_run)
+    } else {
+        None
+    };
+
+    let mut targets = packages
         .into_iter()
-        .find(|Target { name, kind, .. }| {
-            lib && (kind.contains(&"lib".to_owned()) || kind.contains(&"proc-macro".to_owned()))
-                || bin
-                    .as_ref()
-                    .map_or(false, |b| b == name && kind.contains(&"bin".to_owned()))
-                || example
-                    .as_ref()
-                    .map_or(false, |e| e == name && kind.contains(&"example".to_owned()))
-                || test
-                    .as_ref()
-                    .map_or(false, |t| t == name && kind.contains(&"test".to_owned()))
-                || bench
-                    .as_ref()
-                    .map_or(false, |b| b == name && kind.contains(&"bench".to_owned()))
-                || default_run
-                    .as_ref()
-                    .map_or(false, |d| d == name && kind.contains(&"bin".to_owned()))
-        })
-        .ok_or_else(|| anyhow!("Could not determine which target to expand"))?;
+        .flat_map(|p| p.targets.iter().map(move |t| (t, p)));
+
+    let (Target { src_path, .. }, _) = if lib {
+        targets
+            .filter(|(t, _)| {
+                t.kind.contains(&"lib".to_owned()) || t.kind.contains(&"proc-macro".to_owned())
+            })
+            .exactly_one()
+            .map_err(
+                |err| match &*err.map(|(_, p)| &p.name).collect::<Vec<_>>() {
+                    [] => anyhow!("no lib target"),
+                    names => anyhow!("multiple lib targets in the workspace: {:?}", names),
+                },
+            )
+    } else if let Some(bin) = bin.or(default_run) {
+        targets
+            .find(|(t, _)| t.name == bin && t.kind.contains(&"bin".to_owned()))
+            .with_context(|| format!("no bin target named `{}`", bin))
+    } else if let Some(example) = example {
+        targets
+            .find(|(t, _)| t.name == example && t.kind.contains(&"example".to_owned()))
+            .with_context(|| format!("no example target named `{}`", example))
+    } else if let Some(test) = test {
+        targets
+            .find(|(t, _)| t.name == test && t.kind.contains(&"test".to_owned()))
+            .with_context(|| format!("no test target named `{}`", test))
+    } else if let Some(bench) = bench {
+        targets
+            .find(|(t, _)| t.name == bench && t.kind.contains(&"bench".to_owned()))
+            .with_context(|| format!("no bench target named `{}`", bench))
+    } else {
+        Err(anyhow!(
+            "could not determine which target to expand. Use `--lib`, `--bin`, `--example`, `--test`, `--bench`, or `--package` option to specify a target",
+        ))
+    }?;
 
     let mut file = read_code(&src_path)?;
     expand_mods(&src_path, true, &mut file.items)?;

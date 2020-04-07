@@ -38,7 +38,7 @@ OPTIONS:
         --frozen                    [cargo] Require Cargo.lock and cache are up to date
         --locked                    [cargo] Require Cargo.lock is up to date
         --offline                   [cargo] Run without accessing the network
-    -p, --package <SPEC>            TODO
+    -p, --package <SPEC>            Package with the target to expand
         --lib                       Expand this package's library
         --bin <NAME>                Expand the specified binary
         --example <NAME>            Expand the specified example
