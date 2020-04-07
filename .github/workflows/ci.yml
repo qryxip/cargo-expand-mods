@@ -19,11 +19,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
 
+      - name: Setup `stable-x86_64-unknown-linux-gnu`
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable-x86_64-unknown-linux-gnu
+          default: true
+          profile: minimal
+          components: rustfmt
+
       - name: '`cargo fmt --all -- --check`'
         uses: actions-rs/cargo@v1
         with:
           command: fmt
           args: --all -- --check
+
+  grcov:
+    name: grcov
+    runs-on: ubuntu-18.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup `nightly-x86_64-unknown-linux-gnu`
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-x86_64-unknown-linux-gnu
+          profile: minimal
+          default: true
+
+      - name: Modify `package.name`
+        run: sed -i 's/"cargo-expand-mods"/"cargo_expand_mods"/' ./Cargo.toml
+
+      - name: '`cargo test --no-fail-fast`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --no-fail-fast
+        env:
+          CARGO_INCREMENTAL: '0'
+          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zno-landing-pads'
+
+      - name: grcov
+        id: grcov
+        uses: actions-rs/grcov@v0.1
+
+      - name: Codecov
+        uses: codecov/codecov-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ${{ steps.grcov.outputs.report }}
 
   build:
     strategy:
@@ -32,55 +77,25 @@ jobs:
         channel:
           - stable
           - beta
-        target_triple:
+        target-triple:
           - x86_64-pc-windows-msvc
           - x86_64-pc-windows-gnu
           - x86_64-apple-darwin
           - x86_64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
         include:
-          - channel: stable
-            target_triple: x86_64-pc-windows-msvc
-            host_triple: x86_64-pc-windows-msvc
-            os: windows-latest
-          - channel: stable
-            target_triple: x86_64-pc-windows-gnu
-            host_triple: x86_64-pc-windows-gnu
-            os: windows-latest
-          - channel: stable
-            target_triple: x86_64-apple-darwin
-            host_triple: x86_64-apple-darwin
-            os: macOS-latest
-          - channel: stable
-            target_triple: x86_64-unknown-linux-gnu
-            host_triple: x86_64-unknown-linux-gnu
-            os: ubuntu-18.04
-          - channel: stable
-            target_triple: x86_64-unknown-linux-musl
-            host_triple: x86_64-unknown-linux-gnu
-            os: ubuntu-18.04
-          - channel: beta
-            target_triple: x86_64-pc-windows-msvc
-            host_triple: x86_64-pc-windows-msvc
-            os: windows-latest
-          - channel: beta
-            target_triple: x86_64-pc-windows-gnu
-            host_triple: x86_64-pc-windows-gnu
-            os: windows-latest
-          - channel: beta
-            target_triple: x86_64-apple-darwin
-            host_triple: x86_64-apple-darwin
-            os: macOS-latest
-          - channel: beta
-            target_triple: x86_64-unknown-linux-gnu
-            host_triple: x86_64-unknown-linux-gnu
-            os: ubuntu-18.04
-          - channel: beta
-            target_triple: x86_64-unknown-linux-musl
-            host_triple: x86_64-unknown-linux-gnu
-            os: ubuntu-18.04
+          - { channel: stable, target-triple: x86_64-pc-windows-msvc   , host-triple: x86_64-pc-windows-msvc  , os: windows-latest }
+          - { channel: stable, target-triple: x86_64-pc-windows-gnu    , host-triple: x86_64-pc-windows-gnu   , os: windows-latest }
+          - { channel: stable, target-triple: x86_64-apple-darwin      , host-triple: x86_64-apple-darwin     , os: macOS-latest   }
+          - { channel: stable, target-triple: x86_64-unknown-linux-gnu , host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
+          - { channel: stable, target-triple: x86_64-unknown-linux-musl, host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
+          - { channel: beta  , target-triple: x86_64-pc-windows-msvc   , host-triple: x86_64-pc-windows-msvc  , os: windows-latest }
+          - { channel: beta  , target-triple: x86_64-pc-windows-gnu    , host-triple: x86_64-pc-windows-gnu   , os: windows-latest }
+          - { channel: beta  , target-triple: x86_64-apple-darwin      , host-triple: x86_64-apple-darwin     , os: macOS-latest   }
+          - { channel: beta  , target-triple: x86_64-unknown-linux-gnu , host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
+          - { channel: beta  , target-triple: x86_64-unknown-linux-musl, host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
 
-    name: ${{ matrix.channel }}-${{ matrix.target_triple }}
+    name: ${{ matrix.channel }}-${{ matrix.target-triple }}
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -89,18 +104,43 @@ jobs:
 
       - name: '`sudo apt-get install musl-tools`'
         run: sudo apt-get install musl-tools
-        if: matrix.target_triple == 'x86_64-unknown-linux-musl'
+        if: matrix.target-triple == 'x86_64-unknown-linux-musl'
 
-      - name: 'Setup ${{ matrix.channel }}-${{ matrix.host_triple }} (target: ${{ matrix.target_triple }})'
+      - name: 'Setup ${{ matrix.channel }}-${{ matrix.host-triple }} (target: ${{ matrix.target-triple }})'
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ matrix.channel }}-${{ matrix.host_triple }}
-          target: ${{ matrix.target_triple }}
+          toolchain: ${{ matrix.channel }}-${{ matrix.host-triple }}
+          target: ${{ matrix.target-triple }}
           default: true
-          profile: default
+          profile: minimal
+          components: clippy
 
-      - name: '`cargo clippy --target ${{ matrix.target_triple }} -v -- -D warnings`'
+      - name: '`cargo clippy --target ${{ matrix.target-triple }} -v -- -D warnings`'
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --target ${{ matrix.target_triple }} -v -- -D warnings
+          args: --target ${{ matrix.target-triple }} -v -- -D warnings
+
+      - name: '`cargo test --no-fail-fast --target ${{ matrix.target-triple }} -v`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --no-fail-fast --target ${{ matrix.target-triple }} -v
+
+      - name: '`cargo build --target ${{ matrix.target-triple }} -v`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --target ${{ matrix.target-triple }} -v
+
+      - name: '`cargo install --path . --debug --target ${{ matrix.target-triple }} -v --locked`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: --path . --debug --target ${{ matrix.target-triple }} -v --locked
+
+      - name: '`cargo install --path . --debug --target ${{ matrix.target-triple }} -v`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: --path . --debug --target ${{ matrix.target-triple }} -v
