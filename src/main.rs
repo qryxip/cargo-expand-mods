@@ -1,18 +1,20 @@
 use anyhow::{anyhow, ensure, Context as _};
 use arrayvec::ArrayVec;
 use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
+use duct::cmd;
 use itertools::Itertools as _;
-use quote::quote;
+use proc_macro2::LineColumn;
 use serde::Deserialize;
+use smallvec::SmallVec;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
-use syn::token::Brace;
+use syn::spanned::Spanned as _;
 use syn::{Item, Lit, Meta, MetaNameValue};
 use url::Url;
 
-use std::io::Write as _;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::{env, fs, iter, str};
 
 #[derive(StructOpt, Debug)]
@@ -230,25 +232,33 @@ fn main() -> anyhow::Result<()> {
         ))
     }?;
 
-    let mut file = read_code(&src_path)?;
-    expand_mods(&src_path, true, &mut file.items)?;
+    let expanded = expand_mods(&src_path)?;
 
-    let mut child = Command::new("rustfmt")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .with_context(|| anyhow!("Could not execute `rustfmt`"))?;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(quote!(#file).to_string().as_ref())?;
-    let Output { status, stdout, .. } = child.wait_with_output()?;
-    if !status.success() {
-        return Err(anyhow!("`rustfmt` failed: {:?}", status));
-    }
+    let rustfmt_exe = (|| {
+        let stdout = cmd!(env::var_os("CARGO")?, "--version").read().ok()?;
+        let probably_channel = stdout
+            .trim_start_matches("cargo ")
+            .splitn(2, ' ')
+            .next()
+            .unwrap();
+        cmd!(
+            which::which("rustup").ok()?,
+            "which",
+            "--toolchain",
+            probably_channel,
+            "rustfmt",
+        )
+        .read()
+        .ok()
+    })()
+    .unwrap_or_else(|| "rustfmt".to_owned());
 
-    println!("{}", str::from_utf8(&stdout)?);
+    let Output { stdout, .. } = cmd!(rustfmt_exe)
+        .stdin_bytes(expanded)
+        .stdout_capture()
+        .run()?;
+
+    println!("{}", str::from_utf8(&stdout)?.trim_end());
     Ok(())
 }
 
@@ -265,78 +275,118 @@ struct CargoTomlPackage {
     default_run: Option<String>,
 }
 
-fn expand_mods(current_path: &Path, is_start: bool, items: &mut [Item]) -> anyhow::Result<()> {
-    for item in items {
-        if let Item::Mod(item_mod) = item {
-            if item_mod.content.is_none() {
-                let dir = current_path.parent().unwrap_or_else(|| todo!());
-                let file_stem = current_path.file_stem().unwrap_or_else(|| todo!());
+fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
+    return expand(src_path, 0);
 
-                let paths = item_mod
-                    .attrs
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, a)| a.parse_meta().map(|m| (Some(i), m)))
-                    .flat_map(|(i, meta)| match meta {
-                        Meta::NameValue(MetaNameValue { path, lit, .. })
-                            if path.get_ident().map_or(false, |ident| ident == "path") =>
-                        {
-                            Some((i, lit))
-                        }
-                        _ => None,
-                    })
-                    .flat_map(|(i, lit)| match lit {
-                        Lit::Str(lit_str) => Some((i, lit_str.value())),
-                        _ => None,
-                    })
-                    .next()
-                    .map(|(i, p)| iter::once((i, dir.join(p))).collect::<ArrayVec<[_; 2]>>())
-                    .unwrap_or_else(|| {
-                        let mut dir = dir.to_owned();
-                        if !(is_start || file_stem == "mod") {
-                            dir = dir.join(file_stem);
-                        }
-                        let mut paths = ArrayVec::new();
-                        paths.push((None, dir.join(format!("{}.rs", item_mod.ident))));
-                        paths.push((None, dir.join(item_mod.ident.to_string()).join("mod.rs")));
-                        paths
-                    });
+    fn expand(src_path: &Path, depth: usize) -> anyhow::Result<String> {
+        let code = fs::read_to_string(src_path)
+            .with_context(|| format!("failed to read `{}`", src_path.display()))?;
 
-                let (i, path) = paths
-                    .iter()
-                    .filter(|(_, p)| p.exists())
-                    .exactly_one()
-                    .map_err(|err| {
-                        let paths = paths.iter().map(|(_, p)| p.to_str().unwrap()).format(", ");
-                        match err.count() {
-                            0 => anyhow!("None of the files exists: {{{}}}", paths),
-                            _ => anyhow!("Multiple files exist: {{{}}}", paths),
-                        }
-                    })?;
+        let file = syn::parse_file(&code).with_context(|| {
+            format!("failed to parse the Rust code at `{}`", src_path.display())
+        })?;
 
-                if let Some(i) = *i {
-                    item_mod.attrs.remove(i);
+        let mut lines = code.lines().map(Cow::from).collect::<Vec<_>>();
+        let mut mods = vec![SmallVec::<[_; 1]>::new(); lines.len()];
+
+        if let (Some(dir), Some(file_stem)) = (src_path.parent(), src_path.file_stem()) {
+            for item in file.items {
+                if let Item::Mod(item_mod) = item {
+                    if let Some(semi) = item_mod.semi {
+                        let paths = item_mod
+                            .attrs
+                            .iter()
+                            .flat_map(|a| a.parse_meta().map(|m| (a.span(), m)))
+                            .flat_map(|(span, meta)| match meta {
+                                Meta::NameValue(MetaNameValue { path, lit, .. }) if matches!(path.get_ident(), Some(i) if i == "path") => {
+                                    Some((span, lit))
+                                }
+                                _ => None,
+                            })
+                            .flat_map(|(span, lit)| match lit {
+                                Lit::Str(lit_str) => Some((span, lit_str.value())),
+                                _ => None,
+                            })
+                            .next()
+                            .map(|(s, p)| {
+                                iter::once((Some(s), dir.join(p))).collect::<ArrayVec<[_; 2]>>()
+                            })
+                            .unwrap_or_else(|| {
+                                let mut dir = dir.to_owned();
+                                if !(depth == 0 || file_stem == "mod") {
+                                    dir = dir.join(file_stem);
+                                }
+                                let mut paths = ArrayVec::new();
+                                paths.push((None, dir.join(format!("{}.rs", item_mod.ident))));
+                                paths.push((
+                                    None,
+                                    dir.join(item_mod.ident.to_string()).join("mod.rs"),
+                                ));
+                                paths
+                            });
+
+                        let (span, path) = paths
+                            .iter()
+                            .filter(|(_, p)| p.exists())
+                            .exactly_one()
+                            .map_err(|err| {
+                            let paths = paths.iter().map(|(_, p)| p.to_str().unwrap()).format(", ");
+                            match err.count() {
+                                0 => anyhow!("None of the files exists: {{{}}}", paths),
+                                _ => anyhow!("Multiple files exist: {{{}}}", paths),
+                            }
+                        })?;
+
+                        if let Some(span) = *span {
+                            let (start, end) = (span.start(), span.end());
+                            if start.line == end.line {
+                                lines[start.line - 1] = lines[start.line - 1]
+                                    .chars()
+                                    .enumerate()
+                                    .map(|(i, c)| {
+                                        if (start.column..=end.column).contains(&i) {
+                                            ' '
+                                        } else {
+                                            c
+                                        }
+                                    })
+                                    .collect::<String>()
+                                    .into();
+                            } else {
+                                todo!();
+                            }
+                        }
+
+                        let LineColumn { line, column } = semi.span().start();
+                        mods[line - 1].push((column, expand(path, depth + 1)?));
+                    }
                 }
-
-                let syn::File {
-                    attrs, mut items, ..
-                } = read_code(&path)?;
-
-                item_mod.attrs.extend(attrs);
-                expand_mods(&path, false, &mut items)?;
-
-                item_mod.content = Some((Brace::default(), items));
             }
-            item_mod.semi = None;
         }
-    }
-    Ok(())
-}
 
-fn read_code(path: impl AsRef<Path>) -> anyhow::Result<syn::File> {
-    let path = path.as_ref();
-    fs::read_to_string(path)
-        .map_err(anyhow::Error::from)
-        .and_then(|code| syn::parse_file(&code).map_err(Into::into))
-        .with_context(|| anyhow!("Could not read {}", path.display()))
+        Ok(lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let mut expanded = itertools::repeat_n(' ', 4 * depth).collect::<String>();
+                let mut mods = mods[i].iter().peekable();
+                for (j, ch) in line.chars().enumerate() {
+                    match mods.peek() {
+                        Some((semi_col, content)) if *semi_col == j => {
+                            mods.next();
+                            expanded += " {\n";
+                            expanded += content;
+                            expanded += "}";
+                        }
+                        _ => expanded.push(ch),
+                    }
+                }
+                if expanded.len() == 4 * depth {
+                    expanded.clear(); // trim spaces
+                }
+                expanded += "\n";
+                expanded
+            })
+            .join(""))
+    }
 }
