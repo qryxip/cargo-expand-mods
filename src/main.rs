@@ -2,6 +2,7 @@ use anyhow::{anyhow, ensure, Context as _};
 use arrayvec::ArrayVec;
 use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
 use duct::cmd;
+use fixedbitset::FixedBitSet;
 use itertools::Itertools as _;
 use proc_macro2::LineColumn;
 use serde::Deserialize;
@@ -12,7 +13,6 @@ use syn::spanned::Spanned as _;
 use syn::{Item, Lit, Meta, MetaNameValue};
 use url::Url;
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::{env, fs, iter, str};
@@ -286,7 +286,9 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
             format!("failed to parse the Rust code at `{}`", src_path.display())
         })?;
 
-        let mut lines = code.lines().map(Cow::from).collect::<Vec<_>>();
+        let lines = code.lines().collect::<Vec<_>>();
+
+        let mut path_attrs = vec![FixedBitSet::with_capacity(0); lines.len()];
         let mut mods = vec![SmallVec::<[_; 1]>::new(); lines.len()];
 
         if let (Some(dir), Some(file_stem)) = (src_path.parent(), src_path.file_stem()) {
@@ -338,22 +340,26 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
                         })?;
 
                         if let Some(span) = *span {
+                            macro_rules! insert(($i:expr, $range:expr) => {
+                                let i = $i;
+                                let line = &lines[i];
+                                let path_attrs = &mut path_attrs[i];
+                                if path_attrs.len() == 0 {
+                                    path_attrs.grow(line.len());
+                                }
+                                path_attrs.insert_range($range);
+                            });
+
                             let (start, end) = (span.start(), span.end());
+
                             if start.line == end.line {
-                                lines[start.line - 1] = lines[start.line - 1]
-                                    .chars()
-                                    .enumerate()
-                                    .map(|(i, c)| {
-                                        if (start.column..=end.column).contains(&i) {
-                                            ' '
-                                        } else {
-                                            c
-                                        }
-                                    })
-                                    .collect::<String>()
-                                    .into();
+                                insert!(start.line - 1, start.column..end.column);
                             } else {
-                                todo!();
+                                insert!(start.line - 1, start.column..);
+                                for i in start.line..end.line - 1 {
+                                    insert!(i, ..);
+                                }
+                                insert!(end.line - 1, ..end.column);
                             }
                         }
 
@@ -364,29 +370,34 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
             }
         }
 
-        Ok(lines
+        lines
             .iter()
             .enumerate()
-            .map(|(i, line)| {
-                let mut expanded = itertools::repeat_n(' ', 4 * depth).collect::<String>();
+            .flat_map(|(i, line)| {
+                let mut expanded = vec![b' '; 4 * depth];
                 let mut mods = mods[i].iter().peekable();
-                for (j, ch) in line.chars().enumerate() {
-                    match mods.peek() {
-                        Some((semi_col, content)) if *semi_col == j => {
-                            mods.next();
-                            expanded += " {\n";
-                            expanded += content;
-                            expanded += "}";
+                for (j, byte) in line.bytes().enumerate() {
+                    if !path_attrs[i][j] {
+                        match mods.peek() {
+                            Some((semi_col, content)) if *semi_col == j => {
+                                mods.next();
+                                expanded.extend_from_slice(b" {\n");
+                                expanded.extend_from_slice(content.as_ref());
+                                expanded.push(b'}');
+                            }
+                            _ => expanded.push(byte),
                         }
-                        _ => expanded.push(ch),
                     }
                 }
-                if expanded.len() == 4 * depth {
-                    expanded.clear(); // trim spaces
-                }
-                expanded += "\n";
-                expanded
+                str::from_utf8(&expanded)
+                    .with_context(|| format!("failed to expand at line {}: {:?}", i + 1, expanded))
+                    .map(|s| Some(s.trim_end().to_owned()).filter(|s| !s.is_empty()))
+                    .transpose()
             })
-            .join(""))
+            .try_fold("".to_owned(), |mut acc, line| {
+                acc += &line?;
+                acc += "\n";
+                Ok(acc)
+            })
     }
 }

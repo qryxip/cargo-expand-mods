@@ -16,11 +16,12 @@ anyhow = "1.0.28"
 arrayvec = "0.5.1"
 cargo_metadata = "0.9.1"
 duct = "0.13.3"
+fixedbitset = "0.2.0"
 itertools = "0.9.0"
 proc-macro2 = { version = "1.0.10", features = ["span-locations"] }
 serde = { version = "1.0.106", features = ["derive"] }
-smallvec = "1.2.0"
-structopt = "0.3.12"
+smallvec = "1.3.0"
+structopt = "0.3.13"
 syn = { version = "1.0.17", features = ["full", "visit-mut"] }
 toml = "0.5.6"
 url = "2.1.1"
