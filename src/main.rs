@@ -376,14 +376,18 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
             .flat_map(|(i, line)| {
                 let mut expanded = vec![b' '; 4 * depth];
                 let mut mods = mods[i].iter().peekable();
+                let mut modified = false;
                 for (j, byte) in line.bytes().enumerate() {
-                    if !path_attrs[i][j] {
+                    if path_attrs[i][j] {
+                        modified = true;
+                    } else {
                         match mods.peek() {
                             Some((semi_col, content)) if *semi_col == j => {
                                 mods.next();
                                 expanded.extend_from_slice(b" {\n");
                                 expanded.extend_from_slice(content.as_ref());
                                 expanded.push(b'}');
+                                modified = true;
                             }
                             _ => expanded.push(byte),
                         }
@@ -391,7 +395,7 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
                 }
                 str::from_utf8(&expanded)
                     .with_context(|| format!("failed to expand at line {}: {:?}", i + 1, expanded))
-                    .map(|s| Some(s.trim_end().to_owned()).filter(|s| !s.is_empty()))
+                    .map(|s| Some(s.trim_end().to_owned()).filter(|s| !(modified && s.is_empty())))
                     .transpose()
             })
             .try_fold("".to_owned(), |mut acc, line| {
