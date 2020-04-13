@@ -17,9 +17,7 @@ $ cargo install --git https://github.com/qryxip/cargo-expand-mods
 ## Usage
 
 ```console
-$ cargo expand-mods --bin "$BIN" > ./main.rs
-$ rustc ./main.rs --edition=2018 -C opt-level=2 -o ./a.out
-$ ./a.out
+$ cargo expand-mods --bin "$BIN" > ./expanded.rs
 ```
 
 ```console
@@ -34,10 +32,11 @@ OPTIONS:
         --all-features              [cargo] Activate all available features
         --no-default-features       [cargo] Do not activate the `default` feature
         --manifest-path <PATH>      [cargo] Path to Cargo.toml
-        --color <WHEN>              [cargo] TODO [possible values: auto, always, never]
+        --color <WHEN>              [cargo] Coloring [default: auto]  [possible values: auto, always, never]
         --frozen                    [cargo] Require Cargo.lock and cache are up to date
         --locked                    [cargo] Require Cargo.lock is up to date
         --offline                   [cargo] Run without accessing the network
+        --ugly                      Do not attempt to run rustfmt
     -p, --package <SPEC>            Package with the target to expand
         --lib                       Expand this package's library
         --bin <NAME>                Expand the specified binary
