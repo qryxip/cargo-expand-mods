@@ -70,6 +70,10 @@ pub enum Opt {
         #[structopt(long)]
         offline: bool,
 
+        /// Do not attempt to run rustfmt
+        #[structopt(long)]
+        ugly: bool,
+
         /// Package with the target to expand
         #[structopt(short, long, value_name("SPEC"))]
         package: Option<String>,
@@ -152,6 +156,7 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
         frozen,
         locked,
         offline,
+        ugly,
         package,
         lib,
         bin,
@@ -290,39 +295,43 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
 
     stderr.status_with_color("Expanding", format_args!("`{}`", name), Color::Green)?;
 
-    let expanded = expand_mods(&src_path)?;
+    let mut expanded = expand_mods(&src_path)?;
 
-    let rustfmt_exe = (|| {
-        let stdout = cmd!(env::var_os("CARGO")?, "--version").read().ok()?;
-        let probably_channel = stdout
-            .trim_start_matches("cargo ")
-            .splitn(2, ' ')
-            .next()
-            .unwrap();
-        cmd!(
-            which::which("rustup").ok()?,
-            "which",
-            "--toolchain",
-            probably_channel,
-            "rustfmt",
-        )
-        .read()
-        .ok()
-    })()
-    .unwrap_or_else(|| "rustfmt".to_owned());
+    if !ugly {
+        let rustfmt_exe = (|| {
+            let stdout = cmd!(env::var_os("CARGO")?, "--version").read().ok()?;
+            let probably_channel = stdout
+                .trim_start_matches("cargo ")
+                .splitn(2, ' ')
+                .next()
+                .unwrap();
+            cmd!(
+                which::which("rustup").ok()?,
+                "which",
+                "--toolchain",
+                probably_channel,
+                "rustfmt",
+            )
+            .read()
+            .ok()
+        })()
+        .unwrap_or_else(|| "rustfmt".to_owned());
 
-    stderr.status_with_color(
-        "Formatting",
-        format_args!("with `{}`", rustfmt_exe),
-        Color::Green,
-    )?;
+        stderr.status_with_color(
+            "Formatting",
+            format_args!("with `{}`", rustfmt_exe),
+            Color::Green,
+        )?;
 
-    let output = cmd!(rustfmt_exe)
-        .stdin_bytes(expanded)
-        .stdout_capture()
-        .run()?;
+        let output = cmd!(rustfmt_exe)
+            .stdin_bytes(expanded)
+            .stdout_capture()
+            .run()?;
 
-    writeln!(stdout, "{}", str::from_utf8(&output.stdout)?.trim_end())?;
+        expanded = String::from_utf8(output.stdout)?;
+    }
+
+    stdout.write_all(expanded.as_ref())?;
     stdout.flush().map_err(Into::into)
 }
 
