@@ -1,3 +1,5 @@
+//! All items are `hidden`.
+
 use anyhow::{anyhow, ensure, Context as _};
 use arrayvec::ArrayVec;
 use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
@@ -7,15 +9,18 @@ use itertools::Itertools as _;
 use proc_macro2::LineColumn;
 use serde::Deserialize;
 use smallvec::SmallVec;
-use structopt::clap::AppSettings;
-use structopt::StructOpt;
-use syn::spanned::Spanned as _;
-use syn::{Item, Lit, Meta, MetaNameValue};
+use std::{
+    fmt::Display,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    {env, fs, iter, str},
+};
+use structopt::{clap::AppSettings, StructOpt};
+use strum::{EnumString, EnumVariantNames, VariantNames as _};
+use syn::{spanned::Spanned as _, Item, Lit, Meta, MetaNameValue};
+use termcolor::{BufferedStandardStream, Color, ColorSpec, WriteColor};
 use url::Url;
-
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::{env, fs, iter, str};
 
 #[doc(hidden)]
 #[derive(StructOpt, Debug)]
@@ -43,14 +48,15 @@ pub enum Opt {
         #[structopt(long, value_name("PATH"))]
         manifest_path: Option<PathBuf>,
 
-        /// [cargo] TODO
+        /// [cargo] Coloring
         #[structopt(
             long,
             value_name("WHEN"),
             case_insensitive(false),
-            possible_values(&["auto", "always", "never"]),
+            default_value("auto"),
+            possible_values(ColorChoice::VARIANTS)
         )]
-        color: Option<String>,
+        color: ColorChoice,
 
         /// [cargo] Require Cargo.lock and cache are up to date
         #[structopt(long)]
@@ -90,14 +96,59 @@ pub enum Opt {
     },
 }
 
+impl Opt {
+    pub fn color(&self) -> ColorChoice {
+        let Self::ExpandMods { color, .. } = *self;
+        color
+    }
+}
+
 #[doc(hidden)]
-pub fn run(opt: Opt) -> anyhow::Result<()> {
+pub struct Context<O, E> {
+    pub cwd: PathBuf,
+    pub stdout: O,
+    pub stderr: E,
+}
+
+impl<O: Write, E: WriteColor> Context<O, E> {
+    pub fn with_current_dir(stdout: O, stderr: E) -> anyhow::Result<Self> {
+        let cwd = env::current_dir().with_context(|| "failed to get CWD")?;
+        Ok(Self {
+            cwd,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+#[doc(hidden)]
+#[derive(EnumString, EnumVariantNames, Debug, Clone, Copy)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    pub fn stderr(self) -> BufferedStandardStream {
+        BufferedStandardStream::stderr(match self {
+            crate::ColorChoice::Auto if atty::is(atty::Stream::Stderr) => {
+                termcolor::ColorChoice::Auto
+            }
+            crate::ColorChoice::Always => termcolor::ColorChoice::Always,
+            _ => termcolor::ColorChoice::Never,
+        })
+    }
+}
+
+#[doc(hidden)]
+pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Result<()> {
     let Opt::ExpandMods {
         features,
         all_features,
         no_default_features,
         manifest_path,
-        color,
         frozen,
         locked,
         offline,
@@ -107,11 +158,14 @@ pub fn run(opt: Opt) -> anyhow::Result<()> {
         example,
         test,
         bench,
+        ..
     } = opt;
 
-    if color.is_some() {
-        todo!();
-    }
+    let Context {
+        cwd,
+        mut stdout,
+        mut stderr,
+    } = ctx;
 
     let metadata = {
         let mut cmd = MetadataCommand::new();
@@ -136,7 +190,7 @@ pub fn run(opt: Opt) -> anyhow::Result<()> {
         if offline {
             cmd.other_options(&["--offline".to_owned()]);
         }
-        cmd.exec()?
+        cmd.current_dir(cwd).exec()?
     };
 
     let mut members = metadata
@@ -200,7 +254,7 @@ pub fn run(opt: Opt) -> anyhow::Result<()> {
         .into_iter()
         .flat_map(|p| p.targets.iter().map(move |t| (t, p)));
 
-    let (Target { src_path, .. }, _) = if lib {
+    let (Target { name, src_path, .. }, _) = if lib {
         targets
             .filter(|(t, _)| {
                 t.kind.contains(&"lib".to_owned()) || t.kind.contains(&"proc-macro".to_owned())
@@ -234,6 +288,8 @@ pub fn run(opt: Opt) -> anyhow::Result<()> {
         ))
     }?;
 
+    stderr.status_with_color("Expanding", format_args!("`{}`", name), Color::Green)?;
+
     let expanded = expand_mods(&src_path)?;
 
     let rustfmt_exe = (|| {
@@ -255,13 +311,19 @@ pub fn run(opt: Opt) -> anyhow::Result<()> {
     })()
     .unwrap_or_else(|| "rustfmt".to_owned());
 
-    let Output { stdout, .. } = cmd!(rustfmt_exe)
+    stderr.status_with_color(
+        "Formatting",
+        format_args!("with `{}`", rustfmt_exe),
+        Color::Green,
+    )?;
+
+    let output = cmd!(rustfmt_exe)
         .stdin_bytes(expanded)
         .stdout_capture()
         .run()?;
 
-    println!("{}", str::from_utf8(&stdout)?.trim_end());
-    Ok(())
+    writeln!(stdout, "{}", str::from_utf8(&output.stdout)?.trim_end())?;
+    stdout.flush().map_err(Into::into)
 }
 
 #[derive(Deserialize, Debug)]
@@ -407,3 +469,25 @@ fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
             })
     }
 }
+
+trait WriteColorExt: WriteColor {
+    fn status_with_color(
+        &mut self,
+        status: impl Display,
+        message: impl Display,
+        color: termcolor::Color,
+    ) -> io::Result<()> {
+        self.set_color(
+            ColorSpec::new()
+                .set_fg(Some(color))
+                .set_bold(true)
+                .set_reset(false),
+        )?;
+        write!(self, "{:>12}", status)?;
+        self.reset()?;
+        writeln!(self, " {}", message)?;
+        self.flush()
+    }
+}
+
+impl<W: WriteColor> WriteColorExt for W {}
