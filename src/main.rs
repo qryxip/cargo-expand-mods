@@ -1,13 +1,19 @@
-use cargo_expand_mods::Opt;
-use std::{io::Write as _, process};
+use cargo_expand_mods::{Context, Opt};
+use std::{
+    io::{self, Write as _},
+    process,
+};
 use structopt::StructOpt as _;
-use termcolor::{BufferedStandardStream, ColorChoice, ColorSpec, WriteColor as _};
+use termcolor::{ColorSpec, WriteColor as _};
 
 fn main() {
     let opt = Opt::from_args();
-    let mut stderr = BufferedStandardStream::stderr(ColorChoice::Auto);
 
-    if let Err(err) = cargo_expand_mods::run(opt) {
+    let (stdout, mut stderr) = (io::stdout(), opt.color().stderr());
+
+    if let Err(err) = Context::with_current_dir(stdout, &mut stderr)
+        .and_then(|ctx| cargo_expand_mods::run(opt, ctx))
+    {
         let _ = stderr.set_color(
             ColorSpec::new()
                 .set_fg(Some(termcolor::Color::Red))
