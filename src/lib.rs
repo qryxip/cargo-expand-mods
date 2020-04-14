@@ -3,6 +3,7 @@
 use anyhow::{anyhow, ensure, Context as _};
 use arrayvec::ArrayVec;
 use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
+use derivative::Derivative;
 use duct::cmd;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools as _;
@@ -250,7 +251,7 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
             .and_then(|cargo_toml| toml::from_str::<CargoToml>(&cargo_toml).map_err(Into::into))
             .with_context(|| format!("Could not read {}", package.manifest_path.to_str().unwrap()))?
             .package
-            .and_then(|CargoTomlPackage { default_run }| default_run)
+            .and_then(|CargoTomlPackage { default_run, .. }| default_run)
     } else {
         None
     };
@@ -259,7 +260,7 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
         .into_iter()
         .flat_map(|p| p.targets.iter().map(move |t| (t, p)));
 
-    let (Target { name, src_path, .. }, _) = if lib {
+    let (Target { name, src_path, .. }, Package { manifest_path, .. }) = if lib {
         targets
             .filter(|(t, _)| {
                 t.kind.contains(&"lib".to_owned()) || t.kind.contains(&"proc-macro".to_owned())
@@ -317,15 +318,29 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
         })()
         .unwrap_or_else(|| "rustfmt".to_owned());
 
+        let cargo_toml = fs::read_to_string(manifest_path)
+            .with_context(|| format!("failed to read `{}`", manifest_path.display()))?;
+        let cargo_toml = toml::from_str::<CargoToml>(&cargo_toml).with_context(|| {
+            format!(
+                "failed to parse the manifest at `{}`",
+                manifest_path.display(),
+            )
+        })?;
+        let edition = cargo_toml
+            .package
+            .map(|CargoTomlPackage { edition, .. }| edition)
+            .unwrap_or_default();
+
         stderr.status_with_color(
             "Formatting",
             format_args!("with `{}`", rustfmt_exe),
             Color::Green,
         )?;
 
-        let output = cmd!(rustfmt_exe)
+        let output = cmd!(rustfmt_exe, "--edition", <&str>::from(edition))
             .stdin_bytes(expanded)
             .stdout_capture()
+            .dir(manifest_path.parent().expect("should not be empty"))
             .run()?;
 
         expanded = String::from_utf8(output.stdout)?;
@@ -344,8 +359,28 @@ struct CargoToml {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 struct CargoTomlPackage {
+    edition: Edition,
     #[serde(default)]
     default_run: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Derivative)]
+#[derivative(Default)]
+enum Edition {
+    #[serde(rename = "2015")]
+    #[derivative(Default)]
+    Edition2015,
+    #[serde(rename = "2018")]
+    Edition2018,
+}
+
+impl From<Edition> for &'static str {
+    fn from(edition: Edition) -> &'static str {
+        match edition {
+            Edition::Edition2015 => "2015",
+            Edition::Edition2018 => "2018",
+        }
+    }
 }
 
 fn expand_mods(src_path: &Path) -> anyhow::Result<String> {
