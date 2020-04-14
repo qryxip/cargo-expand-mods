@@ -46,6 +46,7 @@ dependencies = [
  "arrayvec",
  "atty",
  "cargo_metadata",
+ "derivative",
  "duct",
  "fixedbitset",
  "itertools",
@@ -89,10 +90,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "duct"
-version = "0.13.3"
+name = "derivative"
+version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1607fa68d55be208e83bcfbcfffbc1ec65c9fbcf9eb1a5d548dc3ac0100743b0"
+checksum = "cb582b60359da160a9477ee80f15c8d784c477e69c217ef2cdd4169c24ea380f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "duct"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f90a9c3a25aafbd538c7d40a53f83c4487ee8216c12d1c8ef2c01eb2f6ea1553"
 dependencies = [
  "libc",
  "once_cell",
@@ -164,9 +176,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.68"
+version = "0.2.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea0c0405123bba743ee3f91f49b1c7cfb684eef0da0a50110f758ccf24cdff0"
+checksum = "99e85c08494b21a9054e7fe1374a732aeadaff3980b6990b94bfd3a70f690005"
 
 [[package]]
 name = "matches"
