@@ -1,6 +1,6 @@
 //! All items are `hidden`.
 
-use anyhow::{anyhow, ensure, Context as _};
+use anyhow::{anyhow, bail, Context as _};
 use arrayvec::ArrayVec;
 use cargo_metadata::{CargoOpt, MetadataCommand, Package, Resolve, Target};
 use derivative::Derivative;
@@ -224,7 +224,9 @@ pub fn run<O: Write, E: WriteColor>(opt: Opt, ctx: Context<O, E>) -> anyhow::Res
         let stdout = str::from_utf8(&output.stdout)?.trim_end();
         let stderr = str::from_utf8(&output.stderr)?.trim_end();
 
-        ensure!(output.status.success(), "{}", stderr);
+        if !output.status.success() {
+            bail!("{}", stderr.trim_start_matches("error: "));
+        }
 
         let url = stdout.parse::<Url>()?;
         let fragment = url.fragment().expect("the URL should contain fragment");
